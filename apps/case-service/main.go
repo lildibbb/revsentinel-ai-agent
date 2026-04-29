@@ -47,6 +47,7 @@ type Case struct {
 	CreatedAt      time.Time      `json:"created_at"`
 	UpdatedAt      time.Time      `json:"updated_at"`
 	Evidence       []EvidenceItem `json:"evidence,omitempty"`
+	Reasoning      *CaseReasoningResponse `json:"reasoning,omitempty"`
 }
 
 var (
@@ -197,6 +198,10 @@ func main() {
 			ev = append(ev, EvidenceItem{Kind: kind, Data: data})
 		}
 		c.Evidence = ev
+		if err := attachLatestReasoning(r.Context(), reasoningRepo, &c); err != nil {
+			writeError(w, http.StatusInternalServerError, errors.New("failed to load case reasoning"))
+			return
+		}
 
 		writeJSON(w, http.StatusOK, c)
 	})
@@ -447,6 +452,18 @@ func getLatestCaseReasoning(ctx context.Context, pool *pgxpool.Pool, caseID stri
 	}
 
 	return resp, nil
+}
+
+func attachLatestReasoning(ctx context.Context, store reasoningStore, c *Case) error {
+	resp, err := store.getLatestCaseReasoning(ctx, c.ID)
+	if err != nil {
+		if errors.Is(err, errReasoningNotFound) {
+			return nil
+		}
+		return err
+	}
+	c.Reasoning = &resp
+	return nil
 }
 
 func env(key, def string) string {
