@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 type EvidenceItem struct {
-	Kind string                 `json:"kind"`
-	Data map[string]any         `json:"data"`
+	Kind string         `json:"kind"`
+	Data map[string]any `json:"data"`
 }
 
 type CreateCaseRequest struct {
@@ -29,23 +30,45 @@ type CreateCaseRequest struct {
 	ExposureAmount *float64       `json:"exposure_amount,omitempty"`
 	Currency       string         `json:"currency,omitempty"`
 	Confidence     *float64       `json:"confidence,omitempty"`
-	Evidence       []EvidenceItem  `json:"evidence,omitempty"`
+	Evidence       []EvidenceItem `json:"evidence,omitempty"`
 }
 
 type Case struct {
-	ID             string    `json:"id"`
-	TenantID       string    `json:"tenant_id"`
-	CaseType       string    `json:"case_type"`
-	Status         string    `json:"status"`
-	Severity       string    `json:"severity"`
-	Title          string    `json:"title"`
-	Summary        string    `json:"summary"`
-	ExposureAmount *float64  `json:"exposure_amount,omitempty"`
-	Currency       string    `json:"currency"`
-	Confidence     *float64  `json:"confidence,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	ID             string         `json:"id"`
+	TenantID       string         `json:"tenant_id"`
+	CaseType       string         `json:"case_type"`
+	Status         string         `json:"status"`
+	Severity       string         `json:"severity"`
+	Title          string         `json:"title"`
+	Summary        string         `json:"summary"`
+	ExposureAmount *float64       `json:"exposure_amount,omitempty"`
+	Currency       string         `json:"currency"`
+	Confidence     *float64       `json:"confidence,omitempty"`
+	CreatedAt      time.Time      `json:"created_at"`
+	UpdatedAt      time.Time      `json:"updated_at"`
 	Evidence       []EvidenceItem `json:"evidence,omitempty"`
+}
+
+var (
+	errCaseNotFound      = errors.New("case not found")
+	errReasoningNotFound = errors.New("reasoning not found")
+)
+
+type reasoningStore interface {
+	insertCaseReasoning(ctx context.Context, caseID string, req CreateReasoningRequest) (CaseReasoningResponse, error)
+	getLatestCaseReasoning(ctx context.Context, caseID string) (CaseReasoningResponse, error)
+}
+
+type postgresReasoningStore struct {
+	pool *pgxpool.Pool
+}
+
+func (s postgresReasoningStore) insertCaseReasoning(ctx context.Context, caseID string, req CreateReasoningRequest) (CaseReasoningResponse, error) {
+	return insertCaseReasoning(ctx, s.pool, caseID, req)
+}
+
+func (s postgresReasoningStore) getLatestCaseReasoning(ctx context.Context, caseID string) (CaseReasoningResponse, error) {
+	return getLatestCaseReasoning(ctx, s.pool, caseID)
 }
 
 func main() {
@@ -63,6 +86,7 @@ func main() {
 	defer pool.Close()
 
 	r := chi.NewRouter()
+	reasoningRepo := postgresReasoningStore{pool: pool}
 
 	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -177,6 +201,9 @@ func main() {
 		writeJSON(w, http.StatusOK, c)
 	})
 
+	r.Post("/cases/{id}/reasoning", createReasoningHandler(reasoningRepo))
+	r.Get("/cases/{id}/reasoning/latest", getLatestReasoningHandler(reasoningRepo))
+
 	addr := ":" + port
 	log.Printf("case-service listening on %s", addr)
 	if err := http.ListenAndServe(addr, r); err != nil {
@@ -225,6 +252,201 @@ func insertCase(ctx context.Context, pool *pgxpool.Pool, req CreateCaseRequest) 
 		return "", time.Time{}, time.Time{}, err
 	}
 	return id, createdAt, updatedAt, nil
+}
+
+func createReasoningHandler(store reasoningStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caseID := chi.URLParam(r, "id")
+		if caseID == "" {
+			writeError(w, http.StatusBadRequest, errors.New("case id is required"))
+			return
+		}
+
+		var req CreateReasoningRequest
+		if err := decodeJSON(r, &req); err != nil {
+			writeError(w, http.StatusBadRequest, fmt.Errorf("invalid request body: %w", err))
+			return
+		}
+		if err := validateCreateReasoningRequest(req); err != nil {
+			writeError(w, http.StatusBadRequest, err)
+			return
+		}
+
+		resp, err := store.insertCaseReasoning(r.Context(), caseID, req)
+		if err != nil {
+			if errors.Is(err, errCaseNotFound) {
+				writeError(w, http.StatusNotFound, errCaseNotFound)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, errors.New("failed to persist reasoning"))
+			return
+		}
+
+		writeJSON(w, http.StatusCreated, resp)
+	}
+}
+
+func getLatestReasoningHandler(store reasoningStore) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		caseID := chi.URLParam(r, "id")
+		if caseID == "" {
+			writeError(w, http.StatusBadRequest, errors.New("case id is required"))
+			return
+		}
+
+		resp, err := store.getLatestCaseReasoning(r.Context(), caseID)
+		if err != nil {
+			if errors.Is(err, errReasoningNotFound) {
+				writeError(w, http.StatusNotFound, errReasoningNotFound)
+				return
+			}
+			writeError(w, http.StatusInternalServerError, errors.New("failed to load latest reasoning"))
+			return
+		}
+		writeJSON(w, http.StatusOK, resp)
+	}
+}
+
+func validateCreateReasoningRequest(req CreateReasoningRequest) error {
+	if req.Status == "" ||
+		req.ModelProvider == "" ||
+		req.ModelName == "" ||
+		req.PromptVersion == "" ||
+		req.ResponseSchemaVersion == "" ||
+		req.Summary == "" ||
+		req.RecommendedAction == "" ||
+		req.TraceID == "" {
+		return errors.New("status, model_provider, model_name, prompt_version, response_schema_version, summary, recommended_action, trace_id are required")
+	}
+	if len(req.Citations) == 0 {
+		return errors.New("citations are required")
+	}
+	for _, c := range req.Citations {
+		if c.Source == "" || c.Reference == "" || c.Excerpt == "" {
+			return errors.New("each citation requires source, reference, excerpt")
+		}
+	}
+	return nil
+}
+
+func insertCaseReasoning(ctx context.Context, pool *pgxpool.Pool, caseID string, req CreateReasoningRequest) (CaseReasoningResponse, error) {
+	citationsJSON, err := json.Marshal(req.Citations)
+	if err != nil {
+		return CaseReasoningResponse{}, fmt.Errorf("marshal citations: %w", err)
+	}
+
+	var rationaleJSON *string
+	if req.Rationale != nil {
+		b, mErr := json.Marshal(req.Rationale)
+		if mErr != nil {
+			return CaseReasoningResponse{}, fmt.Errorf("marshal rationale: %w", mErr)
+		}
+		s := string(b)
+		rationaleJSON = &s
+	}
+
+	var resp CaseReasoningResponse
+	var rationaleBytes []byte
+	var citationsBytes []byte
+	err = pool.QueryRow(ctx, `
+		WITH selected_case AS (
+			SELECT id, tenant_id
+			FROM leak_case
+			WHERE id = $1
+		)
+		INSERT INTO case_reasoning (
+			case_id, tenant_id, status, model_provider, model_name, model_version,
+			prompt_version, response_schema_version, summary, recommended_action, rationale,
+			confidence, citations, token_input, token_output, latency_ms, trace_id,
+			error_code, error_message, amount_original, currency_original, amount_myr_normalized,
+			fx_rate_to_myr, fx_rate_timestamp
+		)
+		SELECT
+			selected_case.id, selected_case.tenant_id, $2, $3, $4, $5,
+			$6, $7, $8, $9, $10::jsonb, $11, $12::jsonb, $13, $14, $15, $16,
+			$17, $18, $19, $20, $21, $22, $23
+		FROM selected_case
+		RETURNING
+			id, case_id, tenant_id, status, model_provider, model_name, model_version,
+			prompt_version, response_schema_version, summary, recommended_action, rationale,
+			confidence, citations, token_input, token_output, latency_ms, trace_id,
+			error_code, error_message, amount_original, currency_original, amount_myr_normalized,
+			fx_rate_to_myr, fx_rate_timestamp, created_at, updated_at
+	`, caseID,
+		req.Status, req.ModelProvider, req.ModelName, req.ModelVersion,
+		req.PromptVersion, req.ResponseSchemaVersion, req.Summary, req.RecommendedAction, rationaleJSON,
+		req.Confidence, string(citationsJSON), req.TokenInput, req.TokenOutput, req.LatencyMs, req.TraceID,
+		req.ErrorCode, req.ErrorMessage, req.AmountOriginal, req.CurrencyOriginal, req.AmountMYRNormalized,
+		req.FXRateToMYR, req.FXRateTimestamp,
+	).Scan(
+		&resp.ID, &resp.CaseID, &resp.TenantID, &resp.Status, &resp.ModelProvider, &resp.ModelName, &resp.ModelVersion,
+		&resp.PromptVersion, &resp.ResponseSchemaVersion, &resp.Summary, &resp.RecommendedAction, &rationaleBytes,
+		&resp.Confidence, &citationsBytes, &resp.TokenInput, &resp.TokenOutput, &resp.LatencyMs, &resp.TraceID,
+		&resp.ErrorCode, &resp.ErrorMessage, &resp.AmountOriginal, &resp.CurrencyOriginal, &resp.AmountMYRNormalized,
+		&resp.FXRateToMYR, &resp.FXRateTimestamp, &resp.CreatedAt, &resp.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return CaseReasoningResponse{}, errCaseNotFound
+		}
+		return CaseReasoningResponse{}, err
+	}
+
+	if len(rationaleBytes) > 0 {
+		if err := json.Unmarshal(rationaleBytes, &resp.Rationale); err != nil {
+			return CaseReasoningResponse{}, fmt.Errorf("unmarshal rationale: %w", err)
+		}
+	}
+	if len(citationsBytes) > 0 {
+		if err := json.Unmarshal(citationsBytes, &resp.Citations); err != nil {
+			return CaseReasoningResponse{}, fmt.Errorf("unmarshal citations: %w", err)
+		}
+	}
+
+	return resp, nil
+}
+
+func getLatestCaseReasoning(ctx context.Context, pool *pgxpool.Pool, caseID string) (CaseReasoningResponse, error) {
+	var resp CaseReasoningResponse
+	var rationaleBytes []byte
+	var citationsBytes []byte
+	err := pool.QueryRow(ctx, `
+		SELECT
+			id, case_id, tenant_id, status, model_provider, model_name, model_version,
+			prompt_version, response_schema_version, summary, recommended_action, rationale,
+			confidence, citations, token_input, token_output, latency_ms, trace_id,
+			error_code, error_message, amount_original, currency_original, amount_myr_normalized,
+			fx_rate_to_myr, fx_rate_timestamp, created_at, updated_at
+		FROM case_reasoning
+		WHERE case_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, caseID).Scan(
+		&resp.ID, &resp.CaseID, &resp.TenantID, &resp.Status, &resp.ModelProvider, &resp.ModelName, &resp.ModelVersion,
+		&resp.PromptVersion, &resp.ResponseSchemaVersion, &resp.Summary, &resp.RecommendedAction, &rationaleBytes,
+		&resp.Confidence, &citationsBytes, &resp.TokenInput, &resp.TokenOutput, &resp.LatencyMs, &resp.TraceID,
+		&resp.ErrorCode, &resp.ErrorMessage, &resp.AmountOriginal, &resp.CurrencyOriginal, &resp.AmountMYRNormalized,
+		&resp.FXRateToMYR, &resp.FXRateTimestamp, &resp.CreatedAt, &resp.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return CaseReasoningResponse{}, errReasoningNotFound
+		}
+		return CaseReasoningResponse{}, err
+	}
+
+	if len(rationaleBytes) > 0 {
+		if err := json.Unmarshal(rationaleBytes, &resp.Rationale); err != nil {
+			return CaseReasoningResponse{}, fmt.Errorf("unmarshal rationale: %w", err)
+		}
+	}
+	if len(citationsBytes) > 0 {
+		if err := json.Unmarshal(citationsBytes, &resp.Citations); err != nil {
+			return CaseReasoningResponse{}, fmt.Errorf("unmarshal citations: %w", err)
+		}
+	}
+
+	return resp, nil
 }
 
 func env(key, def string) string {
