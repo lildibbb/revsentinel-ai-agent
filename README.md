@@ -46,7 +46,7 @@ Current end-to-end flow:
 | `ingestion-service` | Go | Event intake, persistence, rule/case orchestration |
 | `rules-service` | Go | Deterministic checks for leakage patterns |
 | `case-service` | Go | Case lifecycle data and evidence storage/query |
-| `anomaly-service` | Python (FastAPI) | Anomaly scoring API (current stub implementation) |
+| `anomaly-service` | Python (FastAPI) | Anomaly scoring and backend reasoning APIs |
 | `web-dashboard` | React + Vite | Analyst-facing case feed UI |
 
 ## Detection patterns currently implemented
@@ -83,6 +83,20 @@ Main endpoints:
 - Web dashboard: `http://localhost:5173`
 - API gateway health: `http://localhost:8080/healthz`
 - Case list: `http://localhost:8080/api/cases`
+
+### Backend reasoning flow (anomaly-service)
+
+`anomaly-service` exposes `POST /reasoning/generate` for backend-triggered case reasoning.
+When reasoning is enabled, the service generates grounded output and posts the artifact to `case-service`.
+
+Required environment variables:
+
+- `REASONING_ENABLED=true`
+- `CASE_SERVICE_URL` (for local compose: `http://case-service:8083`)
+- `VERTEX_PROJECT_ID`
+- `VERTEX_LOCATION`
+- `VERTEX_MODEL`
+- `BASE_CURRENCY=MYR`
 
 Frontend local commands:
 
