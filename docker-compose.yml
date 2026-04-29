@@ -45,6 +45,12 @@ services:
     build: ./apps/anomaly-service
     environment:
       PORT: "8090"
+      REASONING_ENABLED: "true"
+      CASE_SERVICE_URL: "http://case-service:8083"
+      VERTEX_PROJECT_ID: "${VERTEX_PROJECT_ID}"
+      VERTEX_LOCATION: "${VERTEX_LOCATION:-asia-southeast1}"
+      VERTEX_MODEL: "${VERTEX_MODEL:-gemini-2.5-pro}"
+      BASE_CURRENCY: "MYR"
 
   api-gateway:
     build: ./apps/api-gateway
