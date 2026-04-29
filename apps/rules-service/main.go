@@ -108,7 +108,7 @@ func evalDiscount(p map[string]any) []Finding {
 			"invoice_id":           getString(p, "invoice_id"),
 			"amount":               amount,
 		},
-	}}}
+	}}
 }
 
 func evalServiceDelivery(p map[string]any) []Finding {
@@ -139,7 +139,7 @@ func evalServiceDelivery(p map[string]any) []Finding {
 			"service_id":  getString(p, "service_id"),
 			"value":       value,
 		},
-	}}}
+	}}
 }
 
 func evalCredit(p map[string]any) []Finding {
@@ -169,7 +169,7 @@ func evalCredit(p map[string]any) []Finding {
 			"amount":      amount,
 			"reason":      getString(p, "reason"),
 		},
-	}}}
+	}}
 }
 
 func getFloat(m map[string]any, key string) (float64, bool) {
