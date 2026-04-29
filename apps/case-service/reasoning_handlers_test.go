@@ -174,3 +174,41 @@ func TestCreateReasoning_DatabaseFailure_ReturnsInternalServerError(t *testing.T
 		t.Fatalf("expected %d, got %d body=%s", http.StatusInternalServerError, rec.Code, rec.Body.String())
 	}
 }
+
+func TestAttachLatestReasoning_Found_SetsReasoning(t *testing.T) {
+	now := time.Date(2026, 4, 29, 10, 0, 0, 0, time.UTC)
+	store := stubReasoningStore{
+		latestResp: CaseReasoningResponse{
+			ID:        "33333333-3333-3333-3333-333333333333",
+			CaseID:    "00000000-0000-0000-0000-000000000001",
+			TenantID:  "demo-tenant",
+			Status:    "success",
+			TraceID:   "trace-3",
+			CreatedAt: now,
+			UpdatedAt: now,
+		},
+	}
+
+	c := &Case{ID: "00000000-0000-0000-0000-000000000001"}
+	if err := attachLatestReasoning(context.Background(), store, c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.Reasoning == nil {
+		t.Fatalf("expected reasoning to be attached")
+	}
+	if c.Reasoning.ID != "33333333-3333-3333-3333-333333333333" {
+		t.Fatalf("unexpected reasoning id: %s", c.Reasoning.ID)
+	}
+}
+
+func TestAttachLatestReasoning_NotFound_LeavesReasoningNil(t *testing.T) {
+	store := stubReasoningStore{latestErr: errReasoningNotFound}
+	c := &Case{ID: "00000000-0000-0000-0000-000000000001"}
+
+	if err := attachLatestReasoning(context.Background(), store, c); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if c.Reasoning != nil {
+		t.Fatalf("expected reasoning to remain nil when not found")
+	}
+}
