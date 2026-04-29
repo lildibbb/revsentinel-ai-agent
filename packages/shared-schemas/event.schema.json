@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://leakguard.local/schemas/event.json",
+  "title": "LeakGuardEvent",
+  "type": "object",
+  "required": ["event_type", "occurred_at", "payload"],
+  "properties": {
+    "event_type": {
+      "type": "string",
+      "description": "e.g. discount_event | service_delivery_event | credit_note"
+    },
+    "occurred_at": { "type": "string", "format": "date-time" },
+    "source": { "type": ["object", "null"], "additionalProperties": true },
+    "payload": { "type": "object", "additionalProperties": true }
+  },
+  "additionalProperties": false
+}
