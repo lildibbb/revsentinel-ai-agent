@@ -63,9 +63,21 @@ CREATE TABLE IF NOT EXISTS case_reasoning (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS event_processing_ledger (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  idempotency_key TEXT NOT NULL UNIQUE,
+  event_id UUID NOT NULL,
+  tenant_id TEXT NOT NULL,
+  event_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 CREATE INDEX IF NOT EXISTS idx_ingested_event_tenant_time ON ingested_event(tenant_id, occurred_at DESC);
 CREATE INDEX IF NOT EXISTS idx_leak_case_tenant_time ON leak_case(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_case_evidence_case_id ON case_evidence(case_id);
 CREATE INDEX IF NOT EXISTS idx_case_reasoning_case_created ON case_reasoning(case_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_case_reasoning_tenant_created ON case_reasoning(tenant_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_case_reasoning_trace_id ON case_reasoning(trace_id);
+CREATE INDEX IF NOT EXISTS idx_event_processing_ledger_event ON event_processing_ledger(event_id);
