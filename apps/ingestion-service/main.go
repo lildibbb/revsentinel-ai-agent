@@ -1,19 +1,19 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"net/http"
 	"os"
 	"time"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"leakguard.local/ingestion-service/internal/queue"
 )
 
 type IngestRequest struct {
@@ -24,59 +24,32 @@ type IngestRequest struct {
 }
 
 type IngestResponse struct {
-	EventID       string    `json:"event_id"`
-	TenantID      string    `json:"tenant_id"`
-	EventType     string    `json:"event_type"`
-	OccurredAt    time.Time `json:"occurred_at"`
-	Findings      []Finding `json:"findings"`
-	CasesCreated  []string  `json:"cases_created"`
-}
-
-type EvaluateResponse struct {
-	Findings []Finding `json:"findings"`
+	EventID      string    `json:"event_id"`
+	TenantID     string    `json:"tenant_id"`
+	EventType    string    `json:"event_type"`
+	OccurredAt   time.Time `json:"occurred_at"`
+	Findings     []Finding `json:"findings"`
+	CasesCreated []string  `json:"cases_created"`
 }
 
 type Finding struct {
-	CaseType       string         `json:"case_type"`
-	Severity       string         `json:"severity"`
-	Title          string         `json:"title"`
-	Summary        string         `json:"summary"`
-	ExposureAmount *float64       `json:"exposure_amount,omitempty"`
-	Currency       string         `json:"currency,omitempty"`
-	Confidence     *float64       `json:"confidence,omitempty"`
-	Evidence       map[string]any `json:"evidence,omitempty"`
-}
-
-type EvidenceItem struct {
-	Kind string         `json:"kind"`
-	Data map[string]any `json:"data"`
-}
-
-type CreateCaseRequest struct {
-	TenantID       string        `json:"tenant_id"`
-	CaseType       string        `json:"case_type"`
-	Status         string        `json:"status"`
-	Severity       string        `json:"severity"`
-	Title          string        `json:"title"`
-	Summary        string        `json:"summary"`
-	ExposureAmount *float64      `json:"exposure_amount,omitempty"`
-	Currency       string        `json:"currency,omitempty"`
-	Confidence     *float64      `json:"confidence,omitempty"`
-	Evidence       []EvidenceItem `json:"evidence,omitempty"`
-}
-
-type CreateCaseResponse struct {
-	ID string `json:"id"`
+	CaseType       string   `json:"case_type"`
+	Severity       string   `json:"severity"`
+	Title          string   `json:"title"`
+	Summary        string   `json:"summary"`
+	ExposureAmount *float64 `json:"exposure_amount,omitempty"`
+	Currency       string   `json:"currency,omitempty"`
+	Confidence     *float64 `json:"confidence,omitempty"`
 }
 
 func main() {
 	port := env("PORT", "8081")
 	dbURL := env("DATABASE_URL", "")
-	rulesURL := env("RULES_URL", "")
-	casesURL := env("CASES_URL", "")
+	redisAddr := env("REDIS_ADDR", "redis:6379")
+	queueName := env("ASYNQ_QUEUE_DEFAULT", "default")
 	tenantID := env("TENANT_ID", "demo-tenant")
-	if dbURL == "" || rulesURL == "" || casesURL == "" {
-		log.Fatal("DATABASE_URL, RULES_URL, and CASES_URL are required")
+	if dbURL == "" {
+		log.Fatal("DATABASE_URL is required")
 	}
 
 	ctx := context.Background()
@@ -86,7 +59,9 @@ func main() {
 	}
 	defer pool.Close()
 
-	client := &http.Client{Timeout: 10 * time.Second}
+	asynqClient := asynq.NewClient(asynq.RedisClientOpt{Addr: redisAddr})
+	defer asynqClient.Close()
+	publisher := queue.NewPublisher(asynqClient, queueName)
 
 	r := chi.NewRouter()
 
@@ -139,20 +114,14 @@ func main() {
 			return
 		}
 
-		findings, err := callRules(r.Context(), client, rulesURL, tenantID, eventID, req.EventType, occurredAt, req.Payload)
-		if err != nil {
-			writeError(w, http.StatusBadGateway, err)
-			return
+		traceID := r.Header.Get("X-Trace-ID")
+		if traceID == "" {
+			traceID = eventID
 		}
-
-		caseIDs := make([]string, 0)
-		for _, f := range findings {
-			caseID, err := createCase(r.Context(), client, casesURL, tenantID, eventID, req.EventType, occurredAt, req.Payload, f)
-			if err != nil {
-				writeError(w, http.StatusBadGateway, err)
-				return
-			}
-			caseIDs = append(caseIDs, caseID)
+		err = publisher.EnqueueProcessEvent(r.Context(), eventID, tenantID, req.EventType, occurredAt.Format(time.RFC3339Nano), traceID)
+		if err != nil {
+			writeEnqueueError(w, eventID, err)
+			return
 		}
 
 		resp := IngestResponse{
@@ -160,8 +129,8 @@ func main() {
 			TenantID:     tenantID,
 			EventType:    req.EventType,
 			OccurredAt:   occurredAt,
-			Findings:     findings,
-			CasesCreated: caseIDs,
+			Findings:     []Finding{},
+			CasesCreated: []string{},
 		}
 		writeJSON(w, http.StatusOK, resp)
 	})
@@ -169,82 +138,6 @@ func main() {
 	addr := ":" + port
 	log.Printf("ingestion-service listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, r))
-}
-
-func callRules(ctx context.Context, client *http.Client, rulesURL, tenantID, eventID, eventType string, occurredAt time.Time, payload map[string]any) ([]Finding, error) {
-	body, _ := json.Marshal(map[string]any{
-		"tenant_id":   tenantID,
-		"event_id":    eventID,
-		"event_type":  eventType,
-		"occurred_at": occurredAt,
-		"payload":     payload,
-	})
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rulesURL+"/evaluate", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		b, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("rules-service %d: %s", resp.StatusCode, string(b))
-	}
-
-	var out EvaluateResponse
-	dec := json.NewDecoder(resp.Body)
-	if err := dec.Decode(&out); err != nil {
-		return nil, err
-	}
-	return out.Findings, nil
-}
-
-func createCase(ctx context.Context, client *http.Client, casesURL, tenantID, eventID, eventType string, occurredAt time.Time, payload map[string]any, f Finding) (string, error) {
-	reqBody := CreateCaseRequest{
-		TenantID:       tenantID,
-		CaseType:       f.CaseType,
-		Status:         "detected",
-		Severity:       f.Severity,
-		Title:          f.Title,
-		Summary:        f.Summary,
-		ExposureAmount: f.ExposureAmount,
-		Currency:       f.Currency,
-		Confidence:     f.Confidence,
-		Evidence: []EvidenceItem{
-			{Kind: "trigger_event", Data: map[string]any{"event_id": eventID, "event_type": eventType, "occurred_at": occurredAt}},
-			{Kind: "event_payload", Data: payload},
-			{Kind: "rule_finding", Data: map[string]any{"case_type": f.CaseType, "severity": f.Severity, "evidence": f.Evidence}},
-		},
-	}
-	b, _ := json.Marshal(reqBody)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, casesURL+"/cases", bytes.NewReader(b))
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode >= 300 {
-		body, _ := io.ReadAll(resp.Body)
-		return "", fmt.Errorf("case-service %d: %s", resp.StatusCode, string(body))
-	}
-
-	var out CreateCaseResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return "", err
-	}
-	if out.ID == "" {
-		return "", errors.New("case-service returned empty id")
-	}
-	return out.ID, nil
 }
 
 func env(key, def string) string {
@@ -269,4 +162,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]any{"error": err.Error()})
+}
+
+func writeEnqueueError(w http.ResponseWriter, eventID string, err error) {
+	writeJSON(w, http.StatusBadGateway, map[string]any{
+		"error":    fmt.Sprintf("enqueue process_event.v1 failed: %v", err),
+		"event_id": eventID,
+	})
 }
