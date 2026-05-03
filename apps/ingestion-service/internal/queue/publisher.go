@@ -64,15 +64,18 @@ func NewProcessEventTask(eventID, tenantID, eventType, occurredAt, traceID strin
 	return asynq.NewTask(TaskTypeProcessEvent, body), nil
 }
 
-func (p *Publisher) EnqueueProcessEvent(ctx context.Context, eventID, tenantID, eventType, occurredAt, traceID string) error {
+func (p *Publisher) EnqueueProcessEvent(ctx context.Context, eventID, tenantID, eventType, occurredAt, traceID string) (string, error) {
 	if p == nil || p.client == nil {
-		return errors.New("publisher client is not configured")
+		return "", errors.New("publisher client is not configured")
 	}
 
 	task, err := NewProcessEventTask(eventID, tenantID, eventType, occurredAt, traceID)
 	if err != nil {
-		return err
+		return "", err
 	}
-	_, err = p.client.EnqueueContext(ctx, task, asynq.Queue(p.queueName))
-	return err
+	info, err := p.client.EnqueueContext(ctx, task, asynq.Queue(p.queueName))
+	if err != nil {
+		return "", err
+	}
+	return info.ID, nil
 }
