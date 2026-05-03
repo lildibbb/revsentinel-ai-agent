@@ -8,12 +8,16 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"leakguard.local/ingestion-service/internal/clients"
+	"leakguard.local/ingestion-service/internal/ops"
 	"leakguard.local/ingestion-service/internal/queue"
+	"leakguard.local/ingestion-service/internal/worker"
 )
 
 type IngestRequest struct {
@@ -49,6 +53,10 @@ const (
 	enqueueStatusFailed    = "enqueue_failed"
 	defaultEnqueueTimeout  = 5 * time.Second
 	defaultDBUpdateTimeout = 3 * time.Second
+	defaultWorkerConcurrency = 10
+	defaultMaxRetries      = 10
+	defaultMinBackoffSecs  = 5
+	defaultMaxBackoffSecs  = 30
 )
 
 func main() {
@@ -166,6 +174,65 @@ func main() {
 		writeJSON(w, http.StatusAccepted, resp)
 	})
 
+	// Initialize worker and ops handlers
+	workerConcurrency := intEnv("WORKER_CONCURRENCY", defaultWorkerConcurrency)
+	maxRetries := intEnv("DLQ_MAX_RETRY", defaultMaxRetries)
+	minBackoffSecs := intEnv("MIN_BACKOFF_SECS", defaultMinBackoffSecs)
+	maxBackoffSecs := intEnv("MAX_BACKOFF_SECS", defaultMaxBackoffSecs)
+
+	// Initialize service client adapters
+	rulesEndpoint := env("RULES_SERVICE_URL", "http://rules-service:8082")
+	caseEndpoint := env("CASE_SERVICE_URL", "http://case-service:8083")
+	reasoningEndpoint := env("ANOMALY_SERVICE_URL", "http://anomaly-service:8084")
+
+	rulesClient := clients.NewRulesClient(rulesEndpoint, nil)
+	caseClient := clients.NewCaseClient(caseEndpoint, nil)
+	reasoningClient := clients.NewReasoningClient(reasoningEndpoint, nil)
+
+	// Setup Asynq server (mux) for processing tasks
+	mux := asynq.NewServeMux()
+	taskHandler := worker.NewHandler(rulesClient, caseClient, reasoningClient)
+	mux.HandleFunc(queue.TaskTypeProcessEvent, taskHandler.HandleProcessEvent)
+
+	// Server config with exponential backoff and max retries
+	serverCfg := asynq.Config{
+		Concurrency: workerConcurrency,
+		BaseContext: func() context.Context { return context.Background() },
+		ErrorHandler: asynq.ErrorHandlerFunc(func(ctx context.Context, task *asynq.Task, err error) {
+			log.Printf("task failed: type=%s err=%v", task.Type(), err)
+		}),
+		RetryDelayFunc: func(n int, err error, task *asynq.Task) time.Duration {
+			if n > maxRetries {
+				return -1 // Move to DLQ after max retries
+			}
+			minBackoff := time.Duration(minBackoffSecs) * time.Second
+			maxBackoff := time.Duration(maxBackoffSecs) * time.Second
+			// Exponential backoff: 5s, 10s, 20s, 30s, 30s, ...
+			backoff := minBackoff * (1 << uint(n-1))
+			if backoff > maxBackoff {
+				backoff = maxBackoff
+			}
+			return backoff
+		},
+	}
+
+	server := asynq.NewServer(asynq.RedisClientOpt{Addr: redisAddr}, serverCfg)
+	defer server.Stop()
+
+	// Start worker in background
+	go func() {
+		if err := server.Start(mux); err != nil {
+			log.Fatalf("server start error: %v", err)
+		}
+	}()
+
+	// Wire ops routes with Asynq inspector
+	inspector := asynq.NewInspector(asynq.RedisClientOpt{Addr: redisAddr})
+	defer inspector.Close()
+	inspectorAdapter := ops.NewAsynqInspectorAdapter(inspector)
+	opsHandlers := ops.NewHandlers(inspectorAdapter)
+	ops.RegisterOpsRoutes(r, opsHandlers)
+
 	addr := ":" + port
 	log.Printf("ingestion-service listening on %s", addr)
 	log.Fatal(http.ListenAndServe(addr, r))
@@ -177,6 +244,18 @@ func env(key, def string) string {
 		return def
 	}
 	return v
+}
+
+func intEnv(key string, def int) int {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
 }
 
 func durationEnv(key string, def time.Duration) time.Duration {
