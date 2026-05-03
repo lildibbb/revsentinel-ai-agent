@@ -98,6 +98,42 @@ Required environment variables:
 - `VERTEX_MODEL`
 - `BASE_CURRENCY=MYR`
 
+### Async event processing
+
+Events are processed asynchronously via Asynq + Redis:
+
+1. `ingestion-service` persists the event and enqueues a `process_event.v1` task
+2. HTTP response returns `202 Accepted` with task ID (does not wait for processing)
+3. Worker processes task: calls `rules-service` → creates case → triggers reasoning
+4. Failures are retried with exponential backoff (5s → 30s max)
+5. After 10 retries, failed tasks move to DLQ
+
+#### Operations endpoints (internal-only)
+
+- `GET /ops/queue/stats` - Queue metrics (size, processed, failed count)
+- `GET /ops/queue/dlq` - List tasks in dead letter queue
+- `POST /ops/queue/dlq/retry/{task_id}` - Manually retry a DLQ task
+
+Example:
+
+```bash
+# View queue stats
+curl http://localhost:8081/ops/queue/stats
+
+# List DLQ tasks
+curl http://localhost:8081/ops/queue/dlq
+
+# Retry a failed task
+curl -X POST http://localhost:8081/ops/queue/dlq/retry/task-id-here
+```
+
+Worker concurrency and retry behavior configured via environment:
+
+- `WORKER_CONCURRENCY=10` - number of concurrent task workers
+- `DLQ_MAX_RETRY=10` - max retry attempts before DLQ
+- `MIN_BACKOFF_SECS=5` - initial retry delay
+- `MAX_BACKOFF_SECS=30` - maximum retry delay
+
 Frontend local commands:
 
 ```bash

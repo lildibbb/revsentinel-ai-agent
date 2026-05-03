@@ -33,11 +33,21 @@ services:
     environment:
       PORT: "8081"
       DATABASE_URL: "postgres://leakguard:leakguard@postgres:5432/leakguard?sslmode=disable"
-      RULES_URL: "http://rules-service:8082"
-      CASES_URL: "http://case-service:8083"
+      RULES_SERVICE_URL: "http://rules-service:8082"
+      CASE_SERVICE_URL: "http://case-service:8083"
+      ANOMALY_SERVICE_URL: "http://anomaly-service:8090"
       TENANT_ID: "demo-tenant"
+      REDIS_ADDR: "redis:6379"
+      ASYNQ_QUEUE_CRITICAL: "critical"
+      ASYNQ_QUEUE_DEFAULT: "default"
+      ASYNQ_QUEUE_LOW: "low"
+      WORKER_CONCURRENCY: "10"
+      DLQ_MAX_RETRY: "10"
+      MIN_BACKOFF_SECS: "5"
+      MAX_BACKOFF_SECS: "30"
     depends_on:
       - postgres
+      - redis
       - rules-service
       - case-service
 
