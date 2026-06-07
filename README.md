@@ -1,7 +1,7 @@
 # LeakGuard AI
 
 LeakGuard AI is a revenue leakage detection platform.  
-This repository is a **single-repo monorepo** containing backend services, frontend dashboard, shared schemas, and local infrastructure.
+This repository is a **single-repo monorepo** containing backend services, the frontend dashboard, shared schemas, and local infrastructure.
 
 ## What this repository contains
 
